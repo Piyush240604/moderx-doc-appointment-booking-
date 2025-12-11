@@ -1,6 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import cron from 'node-cron';
 import swaggerJsdoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
 import dotenv from 'dotenv';
@@ -22,48 +21,50 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-// CORS configuration - allow frontend URLs
+// --- 1. Database Connection (Optimized for Serverless) ---
+// We connect immediately when the file loads. 
+// Mongoose handles connection buffering (queuing requests until connected).
+connectDB().catch(err => console.error("Database connection error:", err));
+
+// --- 2. Middleware ---
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
   process.env.FRONTEND_URL,
-  // Add your deployed frontend URLs here
-  // 'https://your-frontend.vercel.app',
-  // 'https://your-frontend.netlify.app',
-].filter(Boolean); // Remove undefined values
+].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
-    
     if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development') {
       callback(null, true);
     } else {
-      callback(null, true); // Allow all origins for now - restrict in production
+      callback(null, true); // Strict: Replace with callback(new Error('Not allowed by CORS')) for production security
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Swagger configuration
+// --- 3. Swagger Configuration ---
 const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
     info: {
       title: 'Doctor Appointment Booking API',
       version: '1.0.0',
-      description: 'API for managing doctor appointments with concurrency control',
+      description: 'API for managing doctor appointments',
     },
     servers: [
       {
-        url: `http://localhost:${PORT}`,
-        description: 'Development server',
+        url: process.env.NODE_ENV === 'production' 
+             ? `https://${process.env.VERCEL_URL}` // Auto-detected Vercel URL
+             : `http://localhost:${PORT}`,
+        description: 'Server',
       },
     ],
   },
@@ -73,9 +74,21 @@ const swaggerOptions = {
 const swaggerSpec = swaggerJsdoc(swaggerOptions);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
-// Routes
+// --- 4. Routes ---
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Replaced node-cron with an HTTP endpoint
+// You can ping this URL using https://cron-job.org or Vercel Cron
+app.get('/api/cron/expire-bookings', async (req, res) => {
+  try {
+    await expirePendingBookings();
+    res.json({ status: 'success', message: 'Expired pending bookings checked' });
+  } catch (error) {
+    console.error('Error in manual expiry trigger:', error);
+    res.status(500).json({ error: 'Failed to expire bookings' });
+  }
 });
 
 app.use('/api/auth', authRoutes);
@@ -83,34 +96,17 @@ app.use('/api/doctors', doctorRoutes);
 app.use('/api/slots', slotRoutes);
 app.use('/api/bookings', bookingRoutes);
 
-// Error handling middleware (must be last)
+// Error handling (must be last)
 app.use(errorHandler);
 
-// Start booking expiry job (runs every 30 seconds)
-cron.schedule('*/30 * * * * *', async () => {
-  try {
-    await expirePendingBookings();
-  } catch (error) {
-    console.error('Error in booking expiry cron job:', error);
-  }
-});
+// --- 5. Start Server (Conditional) ---
+// Only listen if running locally. Vercel handles the rest via export.
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running locally on http://localhost:${PORT}`);
+    console.log(`📚 API Documentation: http://localhost:${PORT}/api-docs`);
+  });
+}
 
-// Connect to MongoDB and start server
-const startServer = async () => {
-  try {
-    await connectDB();
-    
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
-      console.log(`📚 API Documentation: http://localhost:${PORT}/api-docs`);
-    });
-  } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
-  }
-};
-
-startServer();
-
+// Required for Vercel
 export default app;
-
